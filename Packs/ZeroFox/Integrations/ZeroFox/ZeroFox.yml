@@ -3,8 +3,8 @@ commonfields:
   id: ZeroFox
   version: -1
 configuration:
-- defaultvalue: https://api.zerofox.com/1.0
-  display: URL (e.g., https://api.zerofox.com/1.0)
+- defaultvalue: https://api.zerofox.com/
+  display: URL (e.g., https://api.zerofox.com/)
   name: url
   required: true
   type: 0
