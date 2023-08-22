@@ -19,13 +19,14 @@ CLOSED_ALERT_STATUS = ["Closed", "Deleted"]
 
 
 class ZFClient(BaseClient):
-    def __init__(self, username, password, fetch_limit, *args, **kwargs):
+    def __init__(self, username, password, fetch_limit, proxies, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.credentials = {
             "username": username,
             "password": password
         }
         self.fetch_limit = fetch_limit
+        self.proxies = proxies
 
     def api_request(
         self,
@@ -81,6 +82,7 @@ class ZFClient(BaseClient):
             empty_valid_codes=(200, 201),
             return_empty_response=empty_response,
             error_handler=error_handler,
+            proxies=self.proxies,
         )
 
     def handle_auth_error(self, raw_response: Response):
@@ -1674,7 +1676,9 @@ def main():
     FETCH_TIME: str = params.get(
         "fetch_time", FETCH_TIME_DEFAULT,
     ).strip()
-    FETCH_LIMIT: int = int(demisto.params().get("fetch_limit", "100"))
+    FETCH_LIMIT: int = int(params.get("fetch_limit", "100"))
+    USE_SSL: bool = params.get("insecure", False)
+    PROXY: bool = params.get('proxy', False)
 
     commands: dict[str, Callable[[ZFClient, dict[str, Any]], Any]] = {
         "get-modified-remote-data": get_modified_remote_data_command,
@@ -1700,15 +1704,18 @@ def main():
         "zerofox-search-exploits": search_exploits_command,
     }
     try:
+        proxies = handle_proxy()
         client = ZFClient(
             base_url=BASE_URL,
             ok_codes={200, 201},
             username=USERNAME,
             password=PASSWORD,
             fetch_limit=FETCH_LIMIT,
+            verify=USE_SSL,
+            proxy=PROXY,
+            proxies=proxies,
         )
 
-        handle_proxy()
         command = demisto.command()
 
         if command == 'test-module':
