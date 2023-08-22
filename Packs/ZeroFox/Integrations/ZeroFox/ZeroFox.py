@@ -1677,7 +1677,7 @@ def main():
         "fetch_time", FETCH_TIME_DEFAULT,
     ).strip()
     FETCH_LIMIT: int = int(params.get("fetch_limit", "100"))
-    USE_SSL: bool = params.get("insecure", False)
+    USE_SSL: bool = not params.get("insecure", False)
     PROXY: bool = params.get('proxy', False)
 
     commands: dict[str, Callable[[ZFClient, dict[str, Any]], Any]] = {
