@@ -1152,8 +1152,12 @@ def fetch_incidents(
         "sort_direction": "asc",
         "offset": last_modified_offset,
     }
-    is_not_a_new_alert = lambda alert: \
-        parse_date(alert.get("timestamp"), date_formats=(DATE_FORMAT,)).replace(tzinfo=None) < first_run_at
+
+    def is_not_a_new_alert(alert):
+        alert_timestamp = parse_date(alert.get("timestamp"), date_formats=(DATE_FORMAT,))
+        if alert_timestamp is None:
+            return False
+        return alert_timestamp.replace(tzinfo=None) < first_run_at
     incidents, next_offset, oldest_timestamp = get_incidents_data(
         client, params, is_not_a_new_alert,
     )

@@ -83,8 +83,8 @@ def test_fetch_incidents_first_time_with_no_data(requests_mock, mocker):
     alerts_empty_response = load_json("test_data/alerts/list_no_records.json")
     requests_mock.post("/1.0/api-token-auth/", json={"token": ""})
     requests_mock.get("/1.0/alerts/", response_list=[
-        { "json": alerts_empty_response },
-        { "json": alerts_empty_response },
+        {"json": alerts_empty_response},
+        {"json": alerts_empty_response},
     ])
     client = build_zf_client()
     last_run: dict = {}
@@ -242,8 +242,8 @@ def test_fetch_incidents_modified_and_not_created_previously(requests_mock, mock
     alerts_response = load_json("test_data/alerts/list_10_records_with_modified_and_more.json")
     requests_mock.post("/1.0/api-token-auth/", json={"token": ""})
     requests_mock.get("/1.0/alerts/", response_list=[
-        { "json": alerts_empty_response },
-        { "json": alerts_response },
+        {"json": alerts_empty_response},
+        {"json": alerts_response},
     ])
     client = build_zf_client()
     last_run: dict = {}
