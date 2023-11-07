@@ -5,6 +5,7 @@ from CommonServerPython import *
 """ IMPORTS  """
 from dateparser import parse as parse_date
 from datetime import datetime
+from datetime import datetime
 from typing import Any
 from collections.abc import Callable
 from requests import Response
@@ -542,6 +543,7 @@ def alert_to_incident(alert: dict[str, Any]) -> dict[str, str]:
         "rawJSON": json.dumps(alert),
         "name": f"ZeroFox Alert {alert_id}",
         "dbotMirrorId": str(alert_id),
+        "dbotMirrorId": str(alert_id),
         "occurred": alert.get("timestamp", ""),
     }
     return incident
@@ -1034,6 +1036,7 @@ def get_incidents_data(
     next_offset = "0"
 
     response_content = client.list_alerts(params)
+    response_content = client.list_alerts(params)
     alerts: list[dict[str, Any]] = response_content.get("alerts", [])
 
     if not alerts:
@@ -1044,10 +1047,13 @@ def get_incidents_data(
     for alert in alerts:
         if is_valid_alert and not is_valid_alert(alert):
             continue
+        if is_valid_alert and not is_valid_alert(alert):
+            continue
         # Fields for mirroring alert
         alert["mirror_direction"] = "In"
         alert["mirror_instance"] = integration_instance
 
+        processed_alerts.append(alert)
         processed_alerts.append(alert)
         incident = alert_to_incident(alert)
         incidents.append(incident)
