@@ -1119,7 +1119,7 @@ def fetch_incidents(
     # Last modified fetch date
     last_modified_fetched_str = last_run.get("last_modified_fetched", "")
     last_modified_fetched = parse_last_fetched_date(last_modified_fetched_str, first_fetch_time)
-    last_modified_fetched_str = last_fetched.strftime(DATE_FORMAT)
+    last_modified_fetched_str = last_modified_fetched.strftime(DATE_FORMAT)
 
     # Saved modified alerts offset of last run
     last_modified_offset_str: str = last_run.get("last_modified_offset", "0")
