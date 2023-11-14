@@ -1055,7 +1055,10 @@ def get_incidents_data(
 
     # last_alert_timestamp is the timestamp of the last alert in alerts
     # (alerts is a sorted list by timestamp)
-    last_alert_timestamp = processed_alerts[-1].get("timestamp", "")
+    if processed_alerts:
+        last_alert_timestamp = processed_alerts[-1].get("timestamp", "")
+    else:
+        last_alert_timestamp = params["min_timestamp"]
 
     # add 1 millisecond to last alert timestamp,
     # in order to prevent duplicated alerts
