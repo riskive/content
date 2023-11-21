@@ -32,7 +32,7 @@ class ZFClient(BaseClient):
         }
         self.fetch_limit = fetch_limit
         self.only_escalated = only_escalated
-        self.auth_token = None
+        self.auth_token = ""
 
     def api_request(
         self,
@@ -1058,21 +1058,25 @@ def get_incidents_data(
         next_offset = parsed_query.get("offset", ["0"])[0]
 
     # last_alert_timestamp is the oldest timestamp in alerts
-    parsed_last_alert_timestamp = params.get('min_timestamp') or params.get('last_modified_min_date')
+    parsed_last_alert_timestamp: datetime | None = params.get('min_timestamp') or params.get('last_modified_min_date')
+    if parsed_last_alert_timestamp is None:
+        raise ValueError("Incorrect timestamp in params of fetch-incidents")
     for alert in processed_alerts:
-        alert_timestamp_str = alert.get(timestamp_field)
+        alert_timestamp_str: str = alert.get(timestamp_field, "")
         alert_timestamp = parse_date(
             alert_timestamp_str,
             date_formats=(DATE_FORMAT,),
-        ).replace(tzinfo=None)
+        )
+        if alert_timestamp is None:
+            raise ValueError("Incorrect timestamp in alert of fetch-incidents")
+        alert_timestamp = alert_timestamp.replace(tzinfo=None)
         if alert_timestamp > parsed_last_alert_timestamp:
             parsed_last_alert_timestamp = alert_timestamp
 
     # add 1 millisecond to last alert timestamp,
     # in order to prevent duplicated alerts
     if parsed_last_alert_timestamp is None:
-        raise ValueError("Incorrect timestamp in last alert "
-                         "of fetch-incidents")
+        raise ValueError("Incorrect timestamp in last alert of fetch-incidents")
     max_update_time = (
         parsed_last_alert_timestamp + timedelta(milliseconds=1)
     ).strftime(DATE_FORMAT)
