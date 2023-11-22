@@ -222,13 +222,13 @@ def test_fetch_incidents_no_first_time(requests_mock, mocker):
         assert "mirror_direction" in incident["rawJSON"]
 
 
-def test_fetch_incidents_modified_and_not_created_previously(requests_mock, mocker):
+def test_fetch_incidents_with_modified_alerts_first_call(requests_mock, mocker):
     """
     Given
         There are no new alerts
         And there are modified alerts
         And there are more in the next page
-        And last_fetched is set in last_run
+        And last_modified_fetched is not set in last_run
     When
         Calling fetch_incidents
     Then
@@ -276,6 +276,73 @@ def test_fetch_incidents_modified_and_not_created_previously(requests_mock, mock
     assert next_run["first_run_at"] == first_fetch_time
     assert next_run["last_modified_fetched"] == first_fetch_time
     assert next_run["last_modified_offset"] == str(expected_modified_offset)
+    assert len(incidents) == 2
+
+
+def test_fetch_incidents_with_modified_alerts_and_not_first_call(requests_mock, mocker):
+    """
+    Given
+        There are no new alerts
+        And there are modified alerts
+        And there are no more in the next page
+        And last_modified_fetched is set in last_run
+    When
+        Calling fetch_incidents
+    Then
+        It should list alerts with the last_modified_fetched set in last_run
+        And with the last_modified_offset set in last_run
+        And return last_modified_fetch equals to last modified alert timestamp + 1 millisecond
+        And last_modified_offset equals to 0
+        And 2 incidents correctly formatted
+    """
+    alerts_empty_response = load_json("test_data/alerts/list_no_records.json")
+    modified_alerts_response = load_json("test_data/alerts/list_10_records_with_modified.json")
+    requests_mock.post("/1.0/api-token-auth/", json={"token": ""})
+    requests_mock.get("/1.0/alerts/", response_list=[
+        {"json": alerts_empty_response},
+        {"json": modified_alerts_response},
+    ])
+    client = build_zf_client()
+    last_modified_fetched = "2023-06-05T12:34:56.678900"
+    last_run: dict = {
+        "last_modified_fetched": last_modified_fetched,
+        "last_modified_offset": "20",
+    }
+    first_fetch_time = "2023-05-31T00:00:00.000000"
+    first_fetch_time_parsed = parse_date(
+        first_fetch_time,
+        date_formats=(DATE_FORMAT,),
+    )
+    last_modified_fetched_parsed = parse_date(
+        last_modified_fetched,
+        date_formats=(DATE_FORMAT,),
+    )
+    expected_offset = 0
+    expected_modified_offset = int(last_run["last_modified_offset"])
+    spy = mocker.spy(client, "list_alerts")
+    # The first alert in the modified alerts response is the last modified alert
+    expected_next_modified_fetched = get_delayed_formatted_date(modified_alerts_response["alerts"][0]["last_modified"])
+
+    next_run, incidents = fetch_incidents(
+        client,
+        last_run,
+        first_fetch_time,
+    )
+
+    assert spy.call_count == 2
+    list_alert_params = spy.call_args_list[0].args[0]
+    assert list_alert_params.get("min_timestamp") == first_fetch_time_parsed
+    assert list_alert_params.get("sort_direction") == "asc"
+    assert list_alert_params.get("offset") == expected_offset
+    list_modified_alert_params = spy.call_args_list[1].args[0]
+    assert list_modified_alert_params.get("sort_direction") == "asc"
+    assert list_modified_alert_params.get("offset") == expected_modified_offset
+    assert list_modified_alert_params.get("last_modified_min_date") == last_modified_fetched_parsed
+    assert next_run["last_fetched"] == first_fetch_time
+    assert next_run["last_offset"] == str(expected_offset)
+    assert next_run["first_run_at"] == first_fetch_time
+    assert next_run["last_modified_fetched"] == expected_next_modified_fetched
+    assert next_run["last_modified_offset"] == str(expected_offset)
     assert len(incidents) == 2
 
 
