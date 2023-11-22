@@ -251,11 +251,13 @@ def test_fetch_incidents_no_first_time(requests_mock, mocker):
 
 
 def test_fetch_incidents_with_modified_alerts_first_call(requests_mock, mocker):
+def test_fetch_incidents_with_modified_alerts_first_call(requests_mock, mocker):
     """
     Given
         There are no new alerts
         And there are modified alerts
         And there are more in the next page
+        And last_modified_fetched is not set in last_run
         And last_modified_fetched is not set in last_run
     When
         Calling fetch_incidents
