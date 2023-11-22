@@ -32,6 +32,7 @@ class ZFClient(BaseClient):
         }
         self.fetch_limit = fetch_limit
         self.only_escalated = only_escalated
+        self.auth_token = ""
 
     def api_request(
         self,
@@ -103,6 +104,8 @@ class ZFClient(BaseClient):
         """
         :return: Returns the authorization token
         """
+        if self.auth_token:
+            return self.auth_token
         url_suffix: str = "/1.0/api-token-auth/"
         response_content = self.api_request(
             "POST",
@@ -112,8 +115,8 @@ class ZFClient(BaseClient):
             headers_builder_type=None,
             prefix=None,
         )
-        token = response_content.get("token", "")
-        return token
+        self.auth_token = response_content.get("token", "")
+        return self.auth_token
 
     def _get_new_access_token(self) -> str:
         url_suffix: str = "/auth/token/"
@@ -1023,7 +1026,8 @@ def get_exploits_content(
 def get_incidents_data(
     client: ZFClient,
     params: dict[str, Any],
-    is_valid_alert: Callable[[dict[str, Any]], bool] | None = None
+    is_valid_alert: Callable[[dict[str, Any]], bool] | None = None,
+    timestamp_field: str = "timestamp"
 ) -> tuple[list[dict[str, Any]], str, str | None]:
     incidents: list[dict[str, Any]] = []
     next_offset = "0"
@@ -1053,22 +1057,26 @@ def get_incidents_data(
         parsed_query = urlparse.parse_qs(parsed_next_page.query)
         next_offset = parsed_query.get("offset", ["0"])[0]
 
-    # last_alert_timestamp is the timestamp of the last alert in alerts
-    # (alerts is a sorted list by timestamp)
-    if processed_alerts:
-        last_alert_timestamp = processed_alerts[-1].get("timestamp", "")
-    else:
-        last_alert_timestamp = params["min_timestamp"]
+    # last_alert_timestamp is the oldest timestamp in alerts
+    parsed_last_alert_timestamp: datetime | None = params.get('min_timestamp') or params.get('last_modified_min_date')
+    if parsed_last_alert_timestamp is None:
+        raise ValueError("Incorrect timestamp in params of fetch-incidents")
+    for alert in processed_alerts:
+        alert_timestamp_str: str = alert.get(timestamp_field, "")
+        alert_timestamp = parse_date(
+            alert_timestamp_str,
+            date_formats=(DATE_FORMAT,),
+        )
+        if alert_timestamp is None:
+            raise ValueError("Incorrect timestamp in alert of fetch-incidents")
+        alert_timestamp = alert_timestamp.replace(tzinfo=None)
+        if alert_timestamp > parsed_last_alert_timestamp:
+            parsed_last_alert_timestamp = alert_timestamp
 
     # add 1 millisecond to last alert timestamp,
     # in order to prevent duplicated alerts
-    parsed_last_alert_timestamp = parse_date(
-        last_alert_timestamp,
-        date_formats=(DATE_FORMAT,),
-    )
     if parsed_last_alert_timestamp is None:
-        raise ValueError("Incorrect timestamp in last alert "
-                         "of fetch-incidents")
+        raise ValueError("Incorrect timestamp in last alert of fetch-incidents")
     max_update_time = (
         parsed_last_alert_timestamp + timedelta(milliseconds=1)
     ).strftime(DATE_FORMAT)
@@ -1142,7 +1150,10 @@ def fetch_incidents(
         "sort_direction": "asc",
         "offset": last_offset,
     }
-    incidents, next_offset, oldest_timestamp = get_incidents_data(client, params)
+    incidents, next_offset, oldest_timestamp = get_incidents_data(
+        client=client,
+        params=params,
+    )
     if len(incidents) > 0:
         next_run["last_offset"] = next_offset
         if next_offset == "0" and oldest_timestamp:
@@ -1162,7 +1173,10 @@ def fetch_incidents(
             return False
         return alert_timestamp.replace(tzinfo=None) < first_run_at
     incidents, next_offset, oldest_timestamp = get_incidents_data(
-        client, params, is_not_a_new_alert,
+        client=client,
+        params=params,
+        is_valid_alert=is_not_a_new_alert,
+        timestamp_field="last_modified",
     )
     if len(incidents) > 0:
         next_run["last_modified_offset"] = next_offset
