@@ -16,6 +16,7 @@ import json
 FETCH_TIME_DEFAULT = "3 days"
 CLOSED_ALERT_STATUS = ["Closed", "Deleted"]
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
+MAX_ALERT_IDS_STORED = 200
 
 
 """ CLIENT """
@@ -1028,7 +1029,7 @@ def get_incidents_data(
     params: dict[str, Any],
     is_valid_alert: Callable[[dict[str, Any]], bool] | None = None,
     timestamp_field: str = "timestamp"
-) -> tuple[list[dict[str, Any]], str, str | None]:
+) -> tuple[list[dict[str, Any]], str, str | None, list[int]]:
     incidents: list[dict[str, Any]] = []
     next_offset = "0"
 
@@ -1036,10 +1037,10 @@ def get_incidents_data(
     alerts: list[dict[str, Any]] = response_content.get("alerts", [])
 
     if not alerts:
-        return incidents, next_offset, None
+        return incidents, next_offset, None, []
 
     integration_instance = demisto.integrationInstance()
-    processed_alerts = []
+    processed_alerts: list[dict[str, Any]] = []
     for alert in alerts:
         if is_valid_alert and not is_valid_alert(alert):
             continue
@@ -1081,7 +1082,9 @@ def get_incidents_data(
         parsed_last_alert_timestamp + timedelta(milliseconds=1)
     ).strftime(DATE_FORMAT)
 
-    return incidents, next_offset, max_update_time
+    processed_alerts_ids: list[int] = list(map(lambda alert: alert.get("id"), processed_alerts))
+
+    return incidents, next_offset, max_update_time, processed_alerts_ids
 
 
 def parse_last_fetched_date(
@@ -1136,12 +1139,16 @@ def fetch_incidents(
     last_modified_offset_str: str = last_run.get("last_modified_offset", "0")
     last_modified_offset = int(last_modified_offset_str)
 
+    # ZeroFox Alert IDs previously created
+    zf_ids: list[int] = last_run.get("zf-ids", [])
+
     next_run = {
         "last_fetched": last_fetched_str,
         "last_offset": last_offset_str,
         "first_run_at": first_run_at.strftime(DATE_FORMAT),
         "last_modified_fetched": last_modified_fetched_str,
         "last_modified_offset": last_modified_offset_str,
+        "zf-ids": zf_ids,
     }
 
     # Fetch new alerts
@@ -1150,11 +1157,13 @@ def fetch_incidents(
         "sort_direction": "asc",
         "offset": last_offset,
     }
-    incidents, next_offset, oldest_timestamp = get_incidents_data(
+    incidents, next_offset, oldest_timestamp, alert_ids = get_incidents_data(
         client=client,
         params=params,
     )
     if len(incidents) > 0:
+        ingested_alert_ids = alert_ids + next_run["zf-ids"]
+        next_run["zf-ids"] = ingested_alert_ids[:MAX_ALERT_IDS_STORED]
         next_run["last_offset"] = next_offset
         if next_offset == "0" and oldest_timestamp:
             next_run["last_fetched"] = oldest_timestamp
@@ -1168,17 +1177,16 @@ def fetch_incidents(
     }
 
     def is_not_a_new_alert(alert):
-        alert_timestamp = parse_date(alert.get("timestamp"), date_formats=(DATE_FORMAT,))
-        if alert_timestamp is None:
-            return False
-        return alert_timestamp.replace(tzinfo=None) < first_run_at
-    incidents, next_offset, oldest_timestamp = get_incidents_data(
+        return alert.get("id") not in zf_ids
+    incidents, next_offset, oldest_timestamp, alert_ids = get_incidents_data(
         client=client,
         params=params,
         is_valid_alert=is_not_a_new_alert,
         timestamp_field="last_modified",
     )
     if len(incidents) > 0:
+        ingested_alert_ids = alert_ids + next_run["zf-ids"]
+        next_run["zf-ids"] = ingested_alert_ids[:MAX_ALERT_IDS_STORED]
         next_run["last_modified_offset"] = next_offset
         if next_offset == "0" and oldest_timestamp:
             next_run["last_modified_fetched"] = oldest_timestamp

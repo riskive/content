@@ -239,14 +239,16 @@ def test_fetch_incidents_with_modified_alerts_first_call(requests_mock, mocker):
         And 2 incidents correctly formatted
     """
     alerts_empty_response = load_json("test_data/alerts/list_no_records.json")
-    alerts_response = load_json("test_data/alerts/list_10_records_with_modified_and_more.json")
+    modified_alerts_response = load_json("test_data/alerts/list_10_records_with_modified_and_more.json")
     requests_mock.post("/1.0/api-token-auth/", json={"token": ""})
     requests_mock.get("/1.0/alerts/", response_list=[
         {"json": alerts_empty_response},
-        {"json": alerts_response},
+        {"json": modified_alerts_response},
     ])
     client = build_zf_client()
-    last_run: dict = {}
+    last_run: dict = {
+        "zf-ids": list(map(lambda alert: alert["id"], modified_alerts_response["alerts"]))[2:],
+    }
     first_fetch_time = "2023-06-01T00:00:00.000000"
     first_fetch_time_parsed = parse_date(
         first_fetch_time,
@@ -307,6 +309,7 @@ def test_fetch_incidents_with_modified_alerts_and_not_first_call(requests_mock, 
     last_run: dict = {
         "last_modified_fetched": last_modified_fetched,
         "last_modified_offset": "20",
+        "zf-ids": list(map(lambda alert: alert["id"], modified_alerts_response["alerts"]))[2:],
     }
     first_fetch_time = "2023-05-31T00:00:00.000000"
     first_fetch_time_parsed = parse_date(
