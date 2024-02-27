@@ -5,7 +5,7 @@ from CommonServerPython import *
 """ IMPORTS  """
 from dateparser import parse as parse_date
 from datetime import datetime
-from typing import Any, TypedDict
+from typing import Any, TypedDict, BinaryIO
 from collections.abc import Callable
 from requests import Response
 from copy import deepcopy
@@ -411,7 +411,7 @@ class ZFClient(BaseClient):
         self,
         alert_id: int,
         file_name: str,
-        file_content: str,
+        file_content: BinaryIO,
         attachment_type: str
     ) -> dict[str, Any]:
         """
