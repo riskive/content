@@ -9,7 +9,6 @@ from typing import Any, TypedDict, BinaryIO
 from collections.abc import Callable
 from requests import Response
 from copy import deepcopy
-import urllib.parse as urlparse
 import json
 
 """ GLOBALS / PARAMS  """
@@ -21,24 +20,26 @@ MAX_ALERT_IDS_STORED = 300
 """ Types """
 FetchIncidentsStorage = TypedDict("FetchIncidentsStorage", {
     "last_modified_fetched": str,
-    "last_modified_offset": str,
     "zf-ids": list[str],
 })
 
 
 """ CLIENT """
 
+ALLOWED_SORT_FIELDS = ["timestamp", "last_modified"]
+ALLOWED_ALERT_FILTERS = ["last_modified_min_date",
+                         "min_timestamp", "max_timestamp"]
 
-class ZFClient(BaseClient):
+
+class ZeroFox(BaseClient):
     def __init__(
-        self, username, password, fetch_limit, only_escalated, *args, **kwargs
+        self, username, password, only_escalated, *args, **kwargs
     ):
         super().__init__(*args, **kwargs)
         self.credentials = {
             "username": username,
             "password": password
         }
-        self.fetch_limit = fetch_limit
         self.only_escalated = only_escalated
         self.auth_token = ""
 
@@ -195,6 +196,36 @@ class ZFClient(BaseClient):
         )
         return response_content
 
+    def get_alerts(self, filter_by: dict[str, Any] = None, sort_by: str = None, **kwargs) -> dict[str, Any]:
+        """
+        :param filter_by: Dictionary of filter parameters for GET alerts call.
+        :param sort_by: The field to sort by.
+        :param kwargs: Additional parameters to include for GET alerts call.
+        """
+        url_suffix: str = "/alerts/"
+        params = {}
+        if filter_by:
+            params.update({
+                k: v for k, v in filter_by.items()
+                if k in ALLOWED_ALERT_FILTERS
+            })
+        if sort_direction := kwargs.pop("sort_direction", "asc"):
+            params['sort_direction'] = sort_direction
+        if sort_by in ALLOWED_SORT_FIELDS:
+            params['sort_field'] = sort_by
+        if self.only_escalated:
+            params['escalated'] = 'true'
+        response_content = self.api_request(
+            "GET",
+            url_suffix,
+            params=params
+        )
+        alerts = response_content.get("alerts", [])
+        while next_page := response_content.get("next", None):
+            response_content = self.api_request("GET", next_page)
+            alerts += (response_content.get("alerts", []))
+        return alerts
+
     def get_alert(self, alert_id: int) -> dict[str, Any]:
         """
         :param alert_id: The ID of the alert.
@@ -202,7 +233,7 @@ class ZFClient(BaseClient):
         """
         url_suffix: str = f"/alerts/{alert_id}/"
         response_content = self.api_request("GET", url_suffix)
-        return response_content
+        return response_content.get("alert", {})
 
     def alert_user_assignment(
         self,
@@ -586,6 +617,24 @@ class ZFClient(BaseClient):
 """ HELPERS """
 
 
+class AlertToIncident:
+    def __init__(self):
+        self.integration_instance = demisto.integrationInstance()
+
+    def map(self, alert: dict[str, Any]) -> dict[str, Any]:
+        alert_id = str(alert.get("id", ""))
+        alert["mirror_direction"] = "In"
+        alert["mirror_instance"] = integration_instance
+        incident = {
+            "rawJSON": json.dumps(alert),
+            "name": f"ZeroFox Alert {alert_id}",
+            "dbotMirrorId": alert_id,
+            "occurred": alert.get("timestamp", ""),
+            "details": ""  # TODO
+        }
+        return incident
+
+
 def alert_to_incident(alert: dict[str, Any]) -> dict[str, str]:
     """
     transforms an alert to incident convention
@@ -598,6 +647,7 @@ def alert_to_incident(alert: dict[str, Any]) -> dict[str, str]:
         "name": f"ZeroFox Alert {alert_id}",
         "dbotMirrorId": str(alert_id),
         "occurred": alert.get("timestamp", ""),
+        "details": ""  # TODO
     }
     return incident
 
@@ -1097,50 +1147,44 @@ def get_exploits_content(
     return exploits_content
 
 
-def get_incidents_data(
-    client: ZFClient,
-    params: dict[str, Any],
-    is_valid_alert: Callable[[dict[str, Any]], bool] | None = None,
-    timestamp_field: str = "timestamp"
-) -> tuple[list[dict[str, Any]], str, str | None, list[str]]:
-    incidents: list[dict[str, Any]] = []
-    next_offset = "0"
+def _build_incidents_given_last_fetch(
+    client: ZeroFox,
+    last_modified: str,
+    is_valid_alert: Callable[[dict[str, Any]], bool],
+) -> tuple[list[dict[str, Any]], list[str]]:
 
-    response_content = client.list_alerts(params)
-    alerts: list[dict[str, Any]] = response_content.get("alerts", [])
-
+    alerts = [
+        alert for alert in client.get_alerts(
+            filter_by={"last_modified_min_date": last_modified},
+            sort_by="last_modified",
+            sort_direction="asc"
+        )
+        if is_valid_alert(alert)
+    ]
     if not alerts:
-        return incidents, next_offset, None, []
+        return [], []
 
-    integration_instance = demisto.integrationInstance()
-    processed_alerts: list[dict[str, Any]] = []
-    for alert in alerts:
-        if is_valid_alert and not is_valid_alert(alert):
-            continue
-        # Fields for mirroring alert
-        alert["mirror_direction"] = "In"
-        alert["mirror_instance"] = integration_instance
+    alert_to_incident = AlertToIncident()
+    incidents: list[dict[str, Any]] = [
+        alert_to_incident.map(alert) for alert in alerts
+    ]
 
-        processed_alerts.append(alert)
-        incident = alert_to_incident(alert)
-        incidents.append(incident)
+    parsed_last_alert_timestamp = __compute_latest_timestamp(
+        alerts, "last_modified")
 
-    next_page: str = response_content.get("next", "")
-    if next_page:
-        parsed_next_page = urlparse.urlparse(next_page)
-        parsed_query = urlparse.parse_qs(parsed_next_page.query)
-        next_offset = parsed_query.get("offset", ["0"])[0]
-
-    # last_alert_timestamp is the oldest timestamp in alerts
-    parsed_last_alert: str = params.get(
-        'min_timestamp') or params.get('last_modified_min_date') or ""
-    parsed_last_alert_timestamp = parse_date(
-        parsed_last_alert,
-        date_formats=(DATE_FORMAT,),
-    )
+    # add 1 millisecond to last alert timestamp,
+    # in order to prevent duplicated alerts
     if parsed_last_alert_timestamp is None:
-        raise ValueError("Incorrect timestamp in params of fetch-incidents")
-    for alert in processed_alerts:
+        raise ValueError(
+            "Incorrect timestamp in last alert of fetch-incidents")
+    processed_alerts_ids: list[str] = [str(alert.get("id", ""))
+                                       for alert in alerts]
+
+    return incidents, processed_alerts_ids
+
+
+def __compute_latest_timestamp(alerts, timestamp_field: str):
+    for alert in alerts:
         alert_timestamp_str: str = alert.get(timestamp_field, "")
         alert_timestamp = parse_date(
             alert_timestamp_str,
@@ -1151,22 +1195,7 @@ def get_incidents_data(
         alert_timestamp = alert_timestamp.replace(tzinfo=None)
         if alert_timestamp > parsed_last_alert_timestamp:
             parsed_last_alert_timestamp = alert_timestamp
-
-    # add 1 millisecond to last alert timestamp,
-    # in order to prevent duplicated alerts
-    if parsed_last_alert_timestamp is None:
-        raise ValueError(
-            "Incorrect timestamp in last alert of fetch-incidents")
-    max_update_time = (
-        parsed_last_alert_timestamp + timedelta(milliseconds=1)
-    ).strftime(DATE_FORMAT)
-
-    def get_alert_ids(alert: dict[str, Any]) -> str:
-        return str(alert.get("id")) or ""
-    processed_alerts_ids: list[str] = list(
-        map(get_alert_ids, processed_alerts))
-
-    return incidents, next_offset, max_update_time, processed_alerts_ids
+    return parsed_last_alert_timestamp
 
 
 def parse_last_fetched_date(
@@ -1186,7 +1215,7 @@ def parse_last_fetched_date(
 """ COMMANDS """
 
 
-def test_module(client: ZFClient) -> str:
+def test_module(client: ZeroFox) -> str:
     """
     Performs basic get request to get item samples
     """
@@ -1195,7 +1224,7 @@ def test_module(client: ZFClient) -> str:
 
 
 def fetch_incidents(
-    client: ZFClient,
+    client: ZeroFox,
     last_run: FetchIncidentsStorage,
     first_fetch_time: str
 ) -> tuple[FetchIncidentsStorage, list[dict[str, Any]]]:
@@ -1204,69 +1233,61 @@ def fetch_incidents(
     last_modified_fetched = parse_last_fetched_date(
         last_modified_fetched_str, first_fetch_time)
     last_modified_fetched_str = last_modified_fetched.strftime(DATE_FORMAT)
-
-    # Saved modified alerts offset of last run
-    last_modified_offset_str: str = last_run.get("last_modified_offset", "0")
-    last_modified_offset = int(last_modified_offset_str)
-
     # ZeroFox Alert IDs previously created
     zf_ids: list[str] = list(map(str, last_run.get("zf-ids", [])))
 
     # Fetch new alerts
-    params = {
-        "last_modified_min_date": last_modified_fetched.strftime(DATE_FORMAT),
-        "sort_direction": "asc",
-        "sort_field": "last_modified",
-        "offset": last_modified_offset,
-    }
-
     def is_non_registered_alert(alert):
         return str(alert.get("id")) not in zf_ids
-    incidents, next_offset, oldest_timestamp, alert_ids = get_incidents_data(
+    incidents, alert_ids = _build_incidents_given_last_fetch(
         client=client,
-        params=params,
+        last_modified=last_modified_fetched.strftime(DATE_FORMAT),
         is_valid_alert=is_non_registered_alert,
-        timestamp_field="last_modified",
     )
     next_run: FetchIncidentsStorage = {
         "last_modified_fetched": last_modified_fetched_str,
-        "last_modified_offset": last_modified_offset_str,
         "zf-ids": list(zf_ids),
     }
-    if len(incidents) > 0:
-        ingested_alert_ids = alert_ids + zf_ids
-        next_run["zf-ids"] = ingested_alert_ids[:MAX_ALERT_IDS_STORED]
-        next_run["last_modified_offset"] = next_offset
-        if next_offset == "0" and oldest_timestamp:
-            next_run["last_modified_fetched"] = oldest_timestamp
-        return next_run, incidents
+    if not incidents:
+        return next_run, []
+    
+    ingested_alert_ids = alert_ids + zf_ids
+    next_run["zf-ids"] = ingested_alert_ids[:MAX_ALERT_IDS_STORED]
 
-    return next_run, []
+    return next_run, incidents
 
 
 def get_modified_remote_data_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> GetModifiedRemoteDataResponse:
+    """
+    Gets the modified remote alert IDs.
+    Args:
+        args:
+            lastUpdate: the last time we retrieved modified alerts.
+
+    Returns:
+        GetModifiedRemoteDataResponse object, which contains a list of the retrieved alert IDs.
+    """
     args = GetModifiedRemoteDataArgs(args)
     last_update = args.last_update
 
     # Get alerts modified after `last_update`
-    list_alert_params = {
-        "last_modified_min_date": str(last_update),
-        "sort_direction": "asc",
-        "sort_field": "last_modified",
-    }
-
     try:
-        response_content = client.list_alerts(list_alert_params)
+        alerts = client.get_alerts(
+            filter_by={
+                "last_modified_min_date": f"{last_update}"
+            },
+            sort_by="last_modified",
+            sort_direction="asc"
+        )
     except Exception as e:
         raise Exception(f"There was an error {e}, skip update")
 
-    modified_alerts = response_content.get("alerts", [])
-    demisto.debug(f"Fetched {len(modified_alerts)} alerts with "
-                  f"the following params: {list_alert_params}")
-    modified_alert_ids = [str(alert.get("id")) for alert in modified_alerts]
+    demisto.debug(f"Fetched {len(alerts)} alerts that "
+                  f" were modified since {last_update}")
+    modified_alert_ids = [str(alert.get("id")) for alert in alerts]
 
     return GetModifiedRemoteDataResponse(
         modified_incident_ids=modified_alert_ids,
@@ -1274,20 +1295,36 @@ def get_modified_remote_data_command(
 
 
 def get_remote_data_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> GetRemoteDataResponse:
+    """
+    get-remote-data command: Returns an updated remote alert.
+    Args:
+        args:
+            id: alert id to retrieve.
+            lastUpdate: when was the last time we retrieved data.
+
+    Returns:
+        GetRemoteDataResponse object, which contain the alert data to update.
+    """
     args = GetRemoteDataArgs(args)
+    last_update = args.last_update
     alert_id = args.remote_incident_id
 
-    response_content = client.get_alert(alert_id)
-    alert: dict[str, Any] = response_content.get("alert", {})
+    alert: dict[str, Any] = client.get_alert(alert_id)
+    logs = sorted(
+        filter(lambda log: log['timestamp'] > last_update,
+               alert.get("logs", [])
+               ),
+        key=lambda log: log['timestamp'])
     demisto.debug(f"Alert fetched with id {alert.get('id')}")
 
     entries = []
-    if alert.get("status") in CLOSED_ALERT_STATUS:
-        demisto.debug("Incident associated with "
-                      "alert_id={alert_id} is being closed")
+    for log in logs:
+        if log.get("action", "") == "close":
+            demisto.debug(
+                f"Incident associated with {alert_id=} is being closed")
         entries.append({
             "Contents": {
                 "dbotIncidentClose": True,
@@ -1300,13 +1337,12 @@ def get_remote_data_command(
 
 
 def get_alert_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     params = parse_dict_values_to_integer(args, ["alert_id"])
     alert_id: int = params.get("alert_id", "")
-    response_content = client.get_alert(alert_id)
-    alert: dict[str, Any] = response_content.get("alert", {})
+    alert: dict[str, Any] = client.get_alert(alert_id)
     if not alert or not isinstance(alert, dict):
         raise Exception(f"Alert with ID {alert_id} does not exist")
     output = get_alert_contents(alert)
@@ -1320,15 +1356,14 @@ def get_alert_command(
 
 
 def alert_user_assignment_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     params = parse_dict_values_to_integer(args, ["alert_id"])
     alert_id: int = params.get("alert_id", "")
     username: str = args.get("username", "")
     client.alert_user_assignment(alert_id, username)
-    response_content = client.get_alert(alert_id)
-    alert: dict[str, Any] = response_content.get("alert", {})
+    alert: dict[str, Any] = client.get_alert(alert_id)
     contents = get_alert_contents(alert)
 
     return CommandResults(
@@ -1341,14 +1376,13 @@ def alert_user_assignment_command(
 
 
 def close_alert_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     params = parse_dict_values_to_integer(args, ["alert_id"])
     alert_id: int = params.get("alert_id", "")
     client.close_alert(alert_id)
-    response_content = client.get_alert(alert_id)
-    alert: dict[str, Any] = response_content.get("alert", {})
+    alert: dict[str, Any] = client.get_alert(alert_id)
     contents = get_alert_contents(alert)
 
     return CommandResults(
@@ -1360,14 +1394,13 @@ def close_alert_command(
 
 
 def open_alert_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     params = parse_dict_values_to_integer(args, ["alert_id"])
     alert_id: int = params.get("alert_id", "")
     client.open_alert(alert_id)
-    response_content = client.get_alert(alert_id)
-    alert: dict[str, Any] = response_content.get("alert", {})
+    alert: dict[str, Any] = client.get_alert(alert_id)
     contents = get_alert_contents(alert)
 
     return CommandResults(
@@ -1379,14 +1412,13 @@ def open_alert_command(
 
 
 def alert_request_takedown_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     params = parse_dict_values_to_integer(args, ["alert_id"])
     alert_id: int = params.get("alert_id", "")
     client.alert_request_takedown(alert_id)
-    response_content = client.get_alert(alert_id)
-    alert: dict[str, Any] = response_content.get("alert", {})
+    alert: dict[str, Any] = client.get_alert(alert_id)
     contents = get_alert_contents(alert)
 
     return CommandResults(
@@ -1398,14 +1430,13 @@ def alert_request_takedown_command(
 
 
 def alert_cancel_takedown_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     params = parse_dict_values_to_integer(args, ["alert_id"])
     alert_id: int = params.get("alert_id", "")
     client.alert_cancel_takedown(alert_id)
-    response_content = client.get_alert(alert_id)
-    alert: dict[str, Any] = response_content.get("alert", {})
+    alert: dict[str, Any] = client.get_alert(alert_id)
     contents = get_alert_contents(alert)
 
     return CommandResults(
@@ -1417,7 +1448,7 @@ def alert_cancel_takedown_command(
 
 
 def modify_alert_tags_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     params = parse_dict_values_to_integer(args, ["alert_id"])
@@ -1433,8 +1464,7 @@ def modify_alert_tags_command(
     )
     if not response_content.get("changes"):
         raise Exception(f"Alert with ID {alert_id} does not exist")
-    response_content = client.get_alert(alert_id)
-    alert: dict[str, Any] = response_content.get("alert", {})
+    alert: dict[str, Any] = client.get_alert(alert_id)
     contents = get_alert_contents(alert)
 
     return CommandResults(
@@ -1446,7 +1476,7 @@ def modify_alert_tags_command(
 
 
 def create_entity_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     params = parse_dict_values_to_integer(args, ["policy_id"])
@@ -1478,7 +1508,7 @@ def create_entity_command(
 
 
 def list_alerts_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     params = remove_none_dict(args)
@@ -1496,37 +1526,22 @@ def list_alerts_command(
     limit: int = params.get("limit", "")
     if limit and (limit < 0 or limit > 100):
         raise Exception("Incorrect limit. Limit should be 0 <= x <= 100.")
-    response_content = client.list_alerts(params)
-    if not response_content:
+    alerts = client.list_alerts(params)
+    if not alerts:
         return CommandResults(readable_output="No alerts found.", outputs=[])
-    elif isinstance(response_content, dict):
-        alerts: list[dict[str, Any]] = response_content.get("alerts", [])
-        if not alerts:
-            return CommandResults(
-                readable_output="No alerts found.",
-                outputs=[],
-                outputs_prefix="ZeroFox.Alert",
-            )
-        else:
-            output: list[dict[str, Any]] = [
-                get_alert_contents(alert) for alert in alerts
-            ]
-            readable_output = get_human_readable_alerts(output)
-            return CommandResults(
-                outputs=output,
-                readable_output=readable_output,
-                outputs_prefix="ZeroFox.Alert",
-            )
-    else:
-        return CommandResults(
-            readable_output="No alerts found.",
-            outputs=[],
-            outputs_prefix="ZeroFox.Alert",
-        )
+    output: list[dict[str, Any]] = [
+        get_alert_contents(alert) for alert in alerts
+    ]
+    readable_output = get_human_readable_alerts(output)
+    return CommandResults(
+        outputs=output,
+        readable_output=readable_output,
+        outputs_prefix="ZeroFox.Alert",
+    )
 
 
 def list_entities_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     params = remove_none_dict(args)
@@ -1568,16 +1583,15 @@ def list_entities_command(
                 outputs_prefix="ZeroFox.Entity",
             )
 
-    else:
-        return CommandResults(
-            readable_output="No entities found.",
-            outputs=[],
-            outputs_prefix="ZeroFox.Entities",
-        )
+    return CommandResults(
+        readable_output="No entities found.",
+        outputs=[],
+        outputs_prefix="ZeroFox.Entities",
+    )
 
 
 def get_entity_types_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     response_content = client.get_entity_types()
@@ -1601,7 +1615,7 @@ def get_entity_types_command(
 
 
 def get_policy_types_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     response_content = client.get_policy_types()
@@ -1627,7 +1641,7 @@ def get_policy_types_command(
 
 
 def modify_alert_notes_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     params = parse_dict_values_to_integer(args, ["alert_id"])
@@ -1635,13 +1649,11 @@ def modify_alert_notes_command(
     alert_notes: str = params.get("notes", "")
     action: str = params.get("action", "replace")
     if action == "append":
-        response_content = client.get_alert(alert_id)
-        alert_pre_change: dict[str, Any] = response_content.get("alert", {})
+        alert_pre_change: dict[str, Any] = client.get_alert(alert_id)
         old_notes = alert_pre_change.get("notes", "")
         alert_notes = f"{old_notes}\n{alert_notes}" if old_notes else alert_notes
     client.modify_alert_notes(alert_id, alert_notes)
-    response_content = client.get_alert(alert_id)
-    alert: dict[str, Any] = response_content.get("alert", {})
+    alert: dict[str, Any] = client.get_alert(alert_id)
     contents = get_alert_contents(alert)
 
     return CommandResults(
@@ -1654,7 +1666,7 @@ def modify_alert_notes_command(
 
 
 def submit_threat_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     source: str = args.get("source", "")
@@ -1671,8 +1683,7 @@ def submit_threat_command(
     if alert_id is None:
         raise Exception("Threat couldn't be created")
     output = f"Successful submission of threat. ID: {alert_id}."
-    response_content = client.get_alert(alert_id)
-    alert: dict[str, Any] = response_content.get("alert", {})
+    alert: dict[str, Any] = client.get_alert(alert_id)
     contents = get_alert_contents(alert)
 
     return CommandResults(
@@ -1685,7 +1696,7 @@ def submit_threat_command(
 
 
 def send_alert_attachment_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     alert_id: int = args.get("alert_id", "")
@@ -1702,8 +1713,7 @@ def send_alert_attachment_command(
             alert_id, entry["name"], file, attachment_type,
         )
 
-    response_content = client.get_alert(alert_id)
-    alert: dict[str, Any] = response_content.get("alert", {})
+    alert: dict[str, Any] = client.get_alert(alert_id)
     contents = get_alert_contents(alert)
 
     return CommandResults(
@@ -1715,7 +1725,7 @@ def send_alert_attachment_command(
 
 
 def get_alert_attachments_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     alert_id: int = args.get("alert_id", "")
@@ -1743,7 +1753,7 @@ def get_alert_attachments_command(
 
 
 def compromised_domain_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     domain: str = args.get("domain", "")
@@ -1769,7 +1779,7 @@ def compromised_domain_command(
 
 
 def compromised_email_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     email: str = args.get("email", "")
@@ -1802,7 +1812,7 @@ def compromised_email_command(
 
 
 def malicious_ip_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     ip: str = args.get("ip", "")
@@ -1829,7 +1839,7 @@ def malicious_ip_command(
 
 
 def malicious_hash_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     hash: str = args.get("hash", "")
@@ -1853,7 +1863,7 @@ def malicious_hash_command(
 
 
 def search_exploits_command(
-    client: ZFClient,
+    client: ZeroFox,
     args: dict[str, Any]
 ) -> CommandResults:
     since: str = args.get("since", "")
@@ -1890,12 +1900,11 @@ def main():
     FETCH_TIME: str = params.get(
         "fetch_time", FETCH_TIME_DEFAULT,
     ).strip()
-    FETCH_LIMIT: int = int(params.get("fetch_limit", "100"))
     USE_SSL: bool = not params.get("insecure", False)
     PROXY: bool = params.get('proxy', False)
     ONLY_ESCALATED: bool = params.get("only_escalated", False)
 
-    commands: dict[str, Callable[[ZFClient, dict[str, Any]], Any]] = {
+    commands: dict[str, Callable[[ZeroFox, dict[str, Any]], Any]] = {
         "get-modified-remote-data": get_modified_remote_data_command,
         "get-remote-data": get_remote_data_command,
 
@@ -1926,12 +1935,11 @@ def main():
     }
     try:
         handle_proxy()
-        client = ZFClient(
+        client = ZeroFox(
             base_url=BASE_URL,
             ok_codes={200, 201},
             username=USERNAME,
             password=PASSWORD,
-            fetch_limit=FETCH_LIMIT,
             verify=USE_SSL,
             proxy=PROXY,
             only_escalated=ONLY_ESCALATED,

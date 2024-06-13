@@ -1,40 +1,38 @@
 import json
-from dateparser import parse as parse_date
 from datetime import timedelta
+
+from dateparser import parse as parse_date
 from ZeroFox import (
     # Constants
     DATE_FORMAT,
-
-    demisto,
-
     # Client
     ZFClient,
-
-    # Commands
-    fetch_incidents,
-    get_modified_remote_data_command,
-    get_remote_data_command,
-    get_alert_command,
+    alert_cancel_takedown_command,
+    alert_request_takedown_command,
     alert_user_assignment_command,
     close_alert_command,
-    open_alert_command,
-    alert_request_takedown_command,
-    alert_cancel_takedown_command,
-    modify_alert_tags_command,
-    create_entity_command,
-    list_alerts_command,
-    list_entities_command,
-    get_entity_types_command,
-    get_policy_types_command,
-    modify_alert_notes_command,
-    submit_threat_command,
-    send_alert_attachment_command,
-    get_alert_attachments_command,
     compromised_domain_command,
     compromised_email_command,
-    malicious_ip_command,
+    create_entity_command,
+    demisto,
+    # Commands
+    fetch_incidents,
+    get_alert_attachments_command,
+    get_alert_command,
+    get_entity_types_command,
+    get_modified_remote_data_command,
+    get_policy_types_command,
+    get_remote_data_command,
+    list_alerts_command,
+    list_entities_command,
     malicious_hash_command,
+    malicious_ip_command,
+    modify_alert_notes_command,
+    modify_alert_tags_command,
+    open_alert_command,
     search_exploits_command,
+    send_alert_attachment_command,
+    submit_threat_command,
 )
 
 BASE_URL = "https://api.zerofox.com"
