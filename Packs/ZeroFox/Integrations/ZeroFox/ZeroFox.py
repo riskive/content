@@ -51,6 +51,7 @@ class ZFClient(BaseClient):
         headers_builder_type: str | None = 'api',
         params: dict[str, str] | None = None,
         data: dict[str, Any] | None = None,
+        retries: int = 0,
         files: dict[str, Any] | None = None,
         prefix: str | None = "1.0",
         empty_response: bool = False,
@@ -101,6 +102,7 @@ class ZFClient(BaseClient):
             headers=headers,
             params=params,
             json_data=data,
+            retries=retries,
             empty_valid_codes=(200, 201),
             return_empty_response=empty_response,
             error_handler=error_handler,
@@ -183,6 +185,8 @@ class ZFClient(BaseClient):
 
     def list_alerts(self, params: dict[str, Any]) -> dict[str, Any]:
         """
+        Gets the JSON contents of the /alerts/ endpoint
+        according to the parameters provided
         :param params: The request's body parameters.
         :return: HTTP request content.
         """
@@ -200,10 +204,13 @@ class ZFClient(BaseClient):
 
     def get_alerts(self, filter_by: dict[str, Any] = None, sort_by: str = None, **kwargs) -> dict[str, Any]:
         """
+        Fetches a list of all alerts obtained from the pages in the /alerts/ endpoint,
+          considering ordering and filters.
         :param filter_by: Dictionary of filter parameters for GET alerts call.
         :param sort_by: The field to sort by.
         :param kwargs: Additional parameters to include for GET alerts call.
         """
+        RETRIES = 3
         url_suffix: str = "/alerts/"
         params = {}
         if filter_by:
@@ -220,11 +227,16 @@ class ZFClient(BaseClient):
         response_content = self.api_request(
             "GET",
             url_suffix,
+            retries=RETRIES,
             params=params
         )
         alerts = response_content.get("alerts", [])
         while next_page := response_content.get("next", None):
-            response_content = self.api_request("GET", full_url=next_page)
+            response_content = self.api_request(
+                "GET",
+                retries=RETRIES,
+                full_url=next_page
+            )
             alerts += (response_content.get("alerts", []))
         return alerts
 
@@ -1157,7 +1169,8 @@ def _build_incidents_given_last_fetch(
 
     alerts = [
         alert for alert in client.get_alerts(
-            filter_by={"last_modified_min_date": last_modified.strftime(DATE_FORMAT)},
+            filter_by={
+                "last_modified_min_date": last_modified.strftime(DATE_FORMAT)},
             sort_by="last_modified",
             sort_direction="asc"
         )
